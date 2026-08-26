@@ -56,35 +56,29 @@ async def get_user_habits(discord_id: int):
         return result.scalars().all()
 
 
-async def log_habit(discord_id: int, habit_id: int) -> tuple[bool, str]:
+async def log_habit(discord_id: int, habit_id: int) -> tuple[bool, str, dict]:
     """
-    Logs a habit, calculates streak logic based on Bucharest time, and handles freezes.
+    Logs a habit and returns (Success, Message, EventData).
     """
     tz = ZoneInfo("Europe/Bucharest")
     today = datetime.now(tz).date()
+    event_data = {"freeze_used": False, "lost_streak": 0}
 
     async with SessionLocal() as session:
-        # 1. Fetch the habit and the user
         habit = await session.get(Habit, habit_id)
         user = await session.get(User, discord_id)
 
         if not habit or habit.user_id != discord_id:
-            return False, "This habit does not belong to you."
+            return False, "This habit does not belong to you.", event_data
 
-        # 2. Get their most recent log for this habit
         last_log_query = await session.execute(
-            select(HabitLog)
-            .where(HabitLog.habit_id == habit_id)
-            .order_by(HabitLog.completed_at.desc())
-            .limit(1)
+            select(HabitLog).where(HabitLog.habit_id == habit_id).order_by(HabitLog.completed_at.desc()).limit(1)
         )
         last_log = last_log_query.scalar_one_or_none()
 
-        # 3. Calculate calendar days passed
         status_message = ""
 
         if not last_log:
-            # First time logging!
             habit.current_streak = 1
             status_message = f"Day 1 for '{habit.name}'. Don't quit tomorrow."
         else:
@@ -92,32 +86,52 @@ async def log_habit(discord_id: int, habit_id: int) -> tuple[bool, str]:
             days_passed = (today - last_date).days
 
             if days_passed == 0:
-                return False, f"You already logged '{habit.name}' today. Stop trying to cheat the grind."
+                return False, f"You already logged '{habit.name}' today. Stop trying to cheat the grind.", event_data
 
             elif days_passed == 1:
-                # Perfect streak continuation
                 habit.current_streak += 1
                 status_message = f"'{habit.name}' logged. Streak is now {habit.current_streak}. Keep moving forward."
 
             elif days_passed == 2 and user.freezes_available > 0:
-                # Missed yesterday, but has a freeze!
                 user.freezes_available -= 1
                 habit.current_streak += 1
+                event_data["freeze_used"] = True
                 status_message = f"You missed yesterday. A Freeze was consumed ({user.freezes_available} left). Streak saved and increased to {habit.current_streak}."
 
             else:
-                # Streak broken (missed days and no freezes, or missed 2+ days)
                 old_streak = habit.current_streak
+                if old_streak > 0:
+                    event_data["lost_streak"] = old_streak
+
                 habit.current_streak = 1
                 status_message = f"You let your {old_streak}-day streak die because of excuses. Back to day 1 for '{habit.name}'. Do better."
 
-        # 4. Update the longest streak if necessary
         if habit.current_streak > habit.longest_streak:
             habit.longest_streak = habit.current_streak
 
-        # 5. Save the new log and commit
         new_log = HabitLog(habit_id=habit.id)
         session.add(new_log)
         await session.commit()
 
-        return True, status_message
+        return True, status_message, event_data
+
+
+async def delete_habit(discord_id: int, habit_id: int) -> tuple[bool, str]:
+    """
+    Permanently deletes a habit and all its history from the database.
+    """
+    async with SessionLocal() as session:
+        # 1. Fetch the habit
+        habit = await session.get(Habit, habit_id)
+
+        # 2. Security check: Make sure it exists and belongs to the user
+        if not habit or habit.user_id != discord_id:
+            return False, "You can't delete a habit that doesn't belong to you."
+
+        habit_name = habit.name  # Save the name before we destroy it
+
+        # 3. Destroy it (Cascades will automatically delete the logs)
+        await session.delete(habit)
+        await session.commit()
+
+        return True, f"Habit '{habit_name}' and all its history have been permanently erased. Weak."

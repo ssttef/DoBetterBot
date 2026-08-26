@@ -2,7 +2,8 @@ import random
 import discord
 from discord.ext import commands
 from discord import app_commands
-from services.habit_service import create_new_habit, get_user_habits, log_habit
+from services.habit_service import create_new_habit, get_user_habits, log_habit, delete_habit
+from services.achievement_service import check_log_achievements, check_specific_achievement
 
 
 class HabitSelect(discord.ui.Select):
@@ -17,17 +18,59 @@ class HabitSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         habit_id = int(self.values[0])
-        # Call our brain function!
-        success, message = await log_habit(interaction.user.id, habit_id)
 
-        # Edit the dropdown message with the result
+        # We now unpack 3 variables!
+        success, message, event_data = await log_habit(interaction.user.id, habit_id)
         await interaction.response.edit_message(content=message, view=None, embed=None)
+
+        if success:
+            # We pass event_data to the achievement engine
+            unlocked_achievements = await check_log_achievements(interaction.user.id, habit_id, event_data)
+
+            for name, desc in unlocked_achievements:
+                embed = discord.Embed(
+                    title=f"🏆 SECRET ACHIEVEMENT UNLOCKED: {name}",
+                    description=f"*{desc}*",
+                    color=discord.Color.gold()
+                )
+                await interaction.channel.send(content=f"<@{interaction.user.id}>", embed=embed)
 
 
 class HabitLogView(discord.ui.View):
     def __init__(self, habits):
         super().__init__()
         self.add_item(HabitSelect(habits))
+
+class HabitDeleteSelect(discord.ui.Select):
+        def __init__(self, habits):
+            options = [
+                discord.SelectOption(label=habit.name, value=str(habit.id), description="Permanently delete this habit",
+                                     emoji="🗑️")
+                for habit in habits
+            ]
+            super().__init__(placeholder="Select a habit to abandon...", min_values=1, max_values=1, options=options)
+
+        async def callback(self, interaction: discord.Interaction):
+            habit_id = int(self.values[0])
+            success, message = await delete_habit(interaction.user.id, habit_id)
+
+            await interaction.response.edit_message(content=message, view=None, embed=None)
+
+            # Trigger The Quitter!
+            if success:
+                unlocked = await check_specific_achievement(interaction.user.id, "The Quitter")
+                if unlocked:
+                    embed = discord.Embed(
+                        title="🏆 SECRET ACHIEVEMENT UNLOCKED: The Quitter",
+                        description="*Erasing the evidence doesn't mean it didn't happen.*",
+                        color=discord.Color.gold()
+                    )
+                    await interaction.channel.send(content=f"<@{interaction.user.id}>", embed=embed)
+
+class HabitDeleteView(discord.ui.View):
+        def __init__(self, habits):
+            super().__init__()
+            self.add_item(HabitDeleteSelect(habits))
 
 class HabitsCog(commands.Cog):
     def __init__(self, bot):
@@ -58,6 +101,18 @@ class HabitsCog(commands.Cog):
         # 3. Send the success message
         response = random.choice(quotes)
         await interaction.response.send_message(response, ephemeral=True)
+
+        # 4. Check for Full Plate (10 habits)
+        habits = await get_user_habits(interaction.user.id)
+        if len(habits) == 10:
+            unlocked = await check_specific_achievement(interaction.user.id, "Full Plate")
+            if unlocked:
+                embed = discord.Embed(
+                    title="🏆 SECRET ACHIEVEMENT UNLOCKED: Full Plate",
+                    description="*10 habits active. Let's see if you can juggle them all.*",
+                    color=discord.Color.gold()
+                )
+                await interaction.channel.send(content=f"<@{interaction.user.id}>", embed=embed)
 
     @habit_group.command(name="list", description="View your current habits and streaks.")
     async def list_habits(self, interaction: discord.Interaction):
@@ -107,6 +162,18 @@ class HabitsCog(commands.Cog):
         # 2. Show the dropdown menu
         view = HabitLogView(habits)
         await interaction.response.send_message("What did you accomplish today?", view=view, ephemeral=True)
+
+    @habit_group.command(name="delete", description="Permanently delete a habit and erase its history.")
+    async def delete_habit_cmd(self, interaction: discord.Interaction):
+        habits = await get_user_habits(interaction.user.id)
+
+        if not habits:
+            await interaction.response.send_message("You don't have any habits to delete.", ephemeral=True)
+            return
+
+        view = HabitDeleteView(habits)
+        await interaction.response.send_message("Giving up already? Choose what you want to abandon.", view=view,
+                                                ephemeral=True)
 
 
 async def setup(bot):

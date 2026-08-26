@@ -17,6 +17,7 @@ class User(Base):
 
     #"One user can have many habits."
     habits: Mapped[list["Habit"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    achievements: Mapped[list["UserAchievement"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 class Habit(Base):
     __tablename__ = "habits"
@@ -41,3 +42,12 @@ class HabitLog(Base):
 
     # Link back to the habit
     habit: Mapped["Habit"] = relationship(back_populates="logs")
+class UserAchievement(Base):
+    __tablename__ = "user_achievements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.discord_id"))
+    achievement_name: Mapped[str] = mapped_column(String, nullable=False)
+    unlocked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    user: Mapped["User"] = relationship(back_populates="achievements")
